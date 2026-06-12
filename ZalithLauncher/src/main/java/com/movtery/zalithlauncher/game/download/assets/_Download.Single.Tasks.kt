@@ -137,7 +137,7 @@ private fun downloadRequiredDependencies(
             Task.runTask(
                 id = "dependency_resolve_${dependency.projectId}",
                 task = {
-                    getVersions(
+                    getVersions<PlatformVersion>(
                         projectID = dependency.projectId,
                         platform = dependency.platform,
                         pageCallback = { _, _ -> },
