@@ -1,28 +1,13 @@
-/*
- * Zalith Launcher 2
- * Copyright (C) 2025 MovTery <movtery228@qq.com> and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/gpl-3.0.txt>.
- */
-
 package com.movtery.zalithlauncher.game.download.assets
 
 import android.content.Context
 import com.movtery.zalithlauncher.R
 import com.movtery.zalithlauncher.coroutine.Task
 import com.movtery.zalithlauncher.coroutine.TaskSystem
+import com.movtery.zalithlauncher.game.download.assets.platform.Platform
+import com.movtery.zalithlauncher.game.download.assets.platform.PlatformDependencyType
 import com.movtery.zalithlauncher.game.download.assets.platform.PlatformVersion
+import com.movtery.zalithlauncher.game.download.assets.platform.getVersions
 import com.movtery.zalithlauncher.game.download.assets.platform.mcim.mapMCIMMirrorUrls
 import com.movtery.zalithlauncher.game.version.installed.Version
 import com.movtery.zalithlauncher.path.PathManager
@@ -49,6 +34,8 @@ private const val TAG = "DownloadSingle"
  * @param version 要下载单独资源版本信息
  * @param versions 为哪些游戏版本下载
  * @param folder 版本游戏目录下的相对路径
+ * @param autoDownloadDependencies 是否自动下载必需的前置依赖（默认开启）
+ * @param processedProjectIds 已处理过的项目Id集合，避免循环依赖导致的重复下载
  * @param onFileCopied 文件已成功复制到版本游戏目录后 单独回调
  * @param onFileCancelled 文件安装已取消 单独回调
  */
@@ -57,6 +44,8 @@ fun downloadSingleForVersions(
     version: PlatformVersion,
     versions: List<Version>,
     folder: String,
+    autoDownloadDependencies: Boolean = true,
+    processedProjectIds: MutableSet<String> = mutableSetOf(),
     onFileCopied: suspend (zip: File, folder: File) -> Unit = { _, _ -> },
     onFileCancelled: (zip: File, folder: File) -> Unit = { _, _ -> },
     submitError: (ErrorViewModel.ThrowableMessage) -> Unit
@@ -74,6 +63,20 @@ fun downloadSingleForVersions(
                 if (targetFile.exists() && !targetFile.delete()) throw IOException("Failed to properly delete the existing target file.")
                 cacheFile.copyTo(targetFile)
                 onFileCopied(targetFile, targetFolder) //文件已复制回调
+            }
+
+            //自动下载必需的前置依赖
+            if (autoDownloadDependencies) {
+                downloadRequiredDependencies(
+                    context = context,
+                    version = version,
+                    versions = versions,
+                    folder = folder,
+                    processedProjectIds = processedProjectIds,
+                    onFileCopied = onFileCopied,
+                    onFileCancelled = onFileCancelled,
+                    submitError = submitError
+                )
             }
         },
         onError = { e ->
@@ -107,6 +110,88 @@ fun downloadSingleForVersions(
             FileUtils.deleteQuietly(cacheFile)
         }
     )
+}
+
+/**
+ * 自动解析并下载当前版本所必需(REQUIRED)的前置依赖项目
+ * 会根据当前版本的游戏版本号、加载器类型，挑选依赖项目中最匹配、最新的版本进行下载
+ */
+private fun downloadRequiredDependencies(
+    context: Context,
+    version: PlatformVersion,
+    versions: List<Version>,
+    folder: String,
+    processedProjectIds: MutableSet<String>,
+    onFileCopied: suspend (zip: File, folder: File) -> Unit,
+    onFileCancelled: (zip: File, folder: File) -> Unit,
+    submitError: (ErrorViewModel.ThrowableMessage) -> Unit
+) {
+    val requiredDeps = version.platformDependencies()
+        .filter { it.type == PlatformDependencyType.REQUIRED }
+        .filter { processedProjectIds.add(it.projectId) } //标记为已处理，同时过滤已处理过的依赖
+
+    val currentGameVersions = version.platformGameVersion().toSet()
+    val currentLoaders = version.platformLoaders().map { it.getDisplayName() }.toSet()
+
+    requiredDeps.forEach { dependency ->
+        TaskSystem.submitTask(
+            Task.runTask(
+                id = "dependency_resolve_${dependency.projectId}",
+                task = {
+                    getVersions(
+                        projectID = dependency.projectId,
+                        platform = dependency.platform,
+                        pageCallback = { _, _ -> },
+                        onSuccess = { result ->
+                            //初始化所有版本数据，过滤掉初始化失败的版本
+                            val initializedVersions = result.initAll(dependency.projectId)
+
+                            //挑选最匹配当前游戏版本与加载器，并且发布时间最新的依赖版本
+                            val bestMatch = initializedVersions
+                                .filter { dep ->
+                                    val depGameVersions = dep.platformGameVersion().toSet()
+                                    val depLoaders = dep.platformLoaders().map { it.getDisplayName() }.toSet()
+                                    val gameVersionMatch = depGameVersions.any { it in currentGameVersions }
+                                    val loaderMatch = currentLoaders.isEmpty() ||
+                                            depLoaders.isEmpty() ||
+                                            depLoaders.any { it in currentLoaders }
+                                    gameVersionMatch && loaderMatch
+                                }
+                                .maxByOrNull { it.platformDatePublished() }
+                                //若没有完全匹配的版本，回退到只匹配游戏版本的最新版本
+                                ?: initializedVersions
+                                    .filter { dep ->
+                                        dep.platformGameVersion().any { it in currentGameVersions }
+                                    }
+                                    .maxByOrNull { it.platformDatePublished() }
+
+                            bestMatch?.let { depVersion ->
+                                downloadSingleForVersions(
+                                    context = context,
+                                    version = depVersion,
+                                    versions = versions,
+                                    folder = folder,
+                                    autoDownloadDependencies = true,
+                                    processedProjectIds = processedProjectIds,
+                                    onFileCopied = onFileCopied,
+                                    onFileCancelled = onFileCancelled,
+                                    submitError = submitError
+                                )
+                            } ?: run {
+                                Logger.warning(
+                                    TAG,
+                                    "No matching dependency version found for project ${dependency.projectId}, skipping."
+                                )
+                            }
+                        },
+                        onError = {
+                            Logger.warning(TAG, "Failed to resolve dependency project ${dependency.projectId}.")
+                        }
+                    )
+                }
+            )
+        )
+    }
 }
 
 private fun downloadSingleFile(
