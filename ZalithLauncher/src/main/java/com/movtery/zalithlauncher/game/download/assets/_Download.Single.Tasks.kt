@@ -4,7 +4,6 @@ import android.content.Context
 import com.movtery.zalithlauncher.R
 import com.movtery.zalithlauncher.coroutine.Task
 import com.movtery.zalithlauncher.coroutine.TaskSystem
-import com.movtery.zalithlauncher.game.download.assets.platform.Platform
 import com.movtery.zalithlauncher.game.download.assets.platform.PlatformDependencyType
 import com.movtery.zalithlauncher.game.download.assets.platform.PlatformVersion
 import com.movtery.zalithlauncher.game.download.assets.platform.getVersions
@@ -143,8 +142,14 @@ private fun downloadRequiredDependencies(
                         platform = dependency.platform,
                         pageCallback = { _, _ -> },
                         onSuccess = { result ->
-                            //初始化所有版本数据，过滤掉初始化失败的版本
-                            val initializedVersions = result.initAll(dependency.projectId)
+                            //初始化所有版本数据，过滤掉初始化失败的版本，按发布时间倒序排序
+                            val initializedVersions = mutableListOf<PlatformVersion>()
+                            for (depVersion in result) {
+                                if (depVersion.initFile(dependency.projectId)) {
+                                    initializedVersions.add(depVersion)
+                                }
+                            }
+                            initializedVersions.sortByDescending { it.platformDatePublished() }
 
                             //挑选最匹配当前游戏版本与加载器，并且发布时间最新的依赖版本
                             val bestMatch = initializedVersions
