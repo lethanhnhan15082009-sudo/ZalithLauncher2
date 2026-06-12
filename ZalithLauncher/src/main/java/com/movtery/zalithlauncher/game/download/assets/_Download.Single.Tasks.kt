@@ -141,7 +141,7 @@ private fun downloadRequiredDependencies(
                         projectID = dependency.projectId,
                         platform = dependency.platform,
                         pageCallback = { _, _ -> },
-                        onSuccess = { result ->
+                        onSuccess = { result: List<PlatformVersion> ->
                             //初始化所有版本数据，过滤掉初始化失败的版本，按发布时间倒序排序
                             val initializedVersions = mutableListOf<PlatformVersion>()
                             for (depVersion in result) {
